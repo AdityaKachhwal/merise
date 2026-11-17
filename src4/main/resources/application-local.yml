@@ -1,0 +1,29 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/minevest
+    username: minevest
+    password: minevest_local_2026
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+logging:
+  level:
+    org.flywaydb: INFO
+
+
+gemini:
+  api:
+    key: "AQ.Ab8RN6Icss8E_yM2Qr6ZKAWF2Bcg2QeQwXcxgPUxVbopOur5Rw"
+  model: "gemini-3.5-flash"
+

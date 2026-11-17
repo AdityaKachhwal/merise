@@ -1,0 +1,21 @@
+server:
+  port: 8083
+spring:
+  profiles:
+    active: local
+  application:
+    name: minevest
+  servlet:
+    multipart:
+      max-file-size: 25MB
+      max-request-size: 25MB
+minevest:
+  storage:
+    directory: ./data
+  migration:
+    json-to-postgres:
+      enabled: true
+gemini:
+  api:
+    key: ${GEMINI_API_KEY:}
+  model: gemini-3.5-flash
