@@ -13,8 +13,12 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
@@ -22,6 +26,8 @@ import java.util.Optional;
 @Service
 @ConditionalOnProperty(name = "minevest.ai.provider", havingValue = "deterministic", matchIfMissing = true)
 public class DeterministicPortfolioReviewService implements PortfolioReviewProvider {
+
+    private static final ZoneId MARKET_ZONE = ZoneId.of("Asia/Kolkata");
 
     private final ObjectMapper objectMapper;
     private final MarketDataService marketDataService;
@@ -37,271 +43,377 @@ public class DeterministicPortfolioReviewService implements PortfolioReviewProvi
 
     @Override
     public JsonNode reviewPortfolio(JsonNode portfolio) {
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode holdingsOut = objectMapper.createArrayNode();
-        ArrayNode portfolioRisks = objectMapper.createArrayNode();
-        ArrayNode alternatives = objectMapper.createArrayNode();
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode results = objectMapper.createArrayNode();
 
-        JsonNode holdingsNode = portfolio != null && portfolio.has("holdings")
-                ? portfolio.get("holdings")
-                : objectMapper.createArrayNode();
+        JsonNode holdings = portfolio != null && portfolio.has("holdings")
+                ? portfolio.get("holdings") : objectMapper.createArrayNode();
 
-        int assessedCount = 0;
-        int exitOrReviewCount = 0;
+        int count = 0;
+        int reviewCount = 0;
+        int exitCount = 0;
 
-        if (holdingsNode.isArray()) {
-            for (JsonNode item : holdingsNode) {
-                String symbol = textOrDefault(item, "symbol", "").trim().toUpperCase(Locale.ROOT);
+        if (holdings.isArray()) {
+            for (JsonNode holding : holdings) {
+                String symbol = text(holding, "symbol", "").trim().toUpperCase(Locale.ROOT);
                 if (symbol.isBlank()) continue;
-                assessedCount++;
 
-                double avgBuyPrice = numberOrZero(item, "averagePrice", "buyPrice", "avgPrice");
-                double suppliedCurrentPrice = numberOrZero(item, "currentPrice", "ltp", "close");
+                count++;
+                double averagePrice = number(holding, "averagePrice", "buyPrice", "avgPrice");
+                double suppliedCurrentPrice = number(holding, "currentPrice", "ltp", "close");
 
-                ObjectNode assessment = evaluateSingleHolding(symbol, avgBuyPrice, suppliedCurrentPrice);
-                holdingsOut.add(assessment);
+                ObjectNode result = evaluateHolding(symbol, averagePrice, suppliedCurrentPrice);
+                results.add(result);
 
-                String action = assessment.path("action").asText("REVIEW");
-                if (!"HOLD".equals(action)) {
-                    exitOrReviewCount++;
-                }
+                String action = result.path("action").asText("REVIEW");
+                if ("EXIT".equals(action)) exitCount++;
+                if ("REVIEW".equals(action)) reviewCount++;
             }
         }
 
-        root.put("summary", String.format(Locale.US,
-                "Deterministic multi-factor assessment completed for %d holding(s) using PostgreSQL price history, fundamentals, and news catalysts. %d holding(s) flagged for REVIEW or EXIT.",
-                assessedCount, exitOrReviewCount));
-        root.set("holdings", holdingsOut);
-        root.set("portfolioRisks", portfolioRisks);
-        root.set("alternatives", alternatives);
-        root.put("disclaimer", "Deterministic multi-factor analysis based on stored NSE market data, fundamentals, and news feeds. Verify corporate filings before investing.");
-        return root;
+        response.put("summary", String.format(Locale.US,
+                "MineVest assessed %d holding(s): %d marked REVIEW and %d marked EXIT. Unrealised profit or loss is not an exit criterion.",
+                count, reviewCount, exitCount));
+        response.set("holdings", results);
+        response.put("engine", "MINEVEST_DETERMINISTIC");
+        response.put("disclaimer", "Research support only. Recommendations depend on the quality and freshness of available data and are not personalised financial advice.");
+        return response;
     }
 
-    private ObjectNode evaluateSingleHolding(String symbol, double avgBuyPrice, double suppliedCurrentPrice) {
-        ObjectNode node = objectMapper.createObjectNode();
-        List<DailyPrice> prices = marketDataService.prices(symbol);
-        Optional<CompanyFundamental> fundamentalOpt = intelligenceService.getFundamental(symbol);
-        List<StockNews> recentNews = intelligenceService.recentNews(symbol, 14);
+    private ObjectNode evaluateHolding(String symbol, double averagePrice, double suppliedCurrentPrice) {
+        ObjectNode out = objectMapper.createObjectNode();
 
-        List<String> growthDrivers = new ArrayList<>();
+        List<DailyPrice> prices = new ArrayList<>(marketDataService.prices(symbol));
+        prices.sort(Comparator.comparing(DailyPrice::tradingDate,
+                Comparator.nullsLast(Comparator.naturalOrder())));
+
+        Optional<CompanyFundamental> fundamental = intelligenceService.getFundamental(symbol);
+        List<StockNews> news = intelligenceService.recentNews(symbol, 14);
+
+        boolean etf = isEtf(symbol, prices);
+        String assetType = etf ? "ETF" : "EQUITY";
+
+        List<String> drivers = new ArrayList<>();
         List<String> risks = new ArrayList<>();
-        List<String> dataGaps = new ArrayList<>();
+        List<String> gaps = new ArrayList<>();
+        List<String> monitoring = new ArrayList<>();
 
-        // 1. Technical Score (0 - 40)
-        int technicalScore = 20;
-        double latestClose = suppliedCurrentPrice;
+        double lastEodClose = prices.isEmpty() ? 0.0 : value(prices.get(prices.size() - 1).close());
+        // The supplied portfolio price takes precedence. Do not silently replace it with an older EOD close.
+        double assessedPrice = suppliedCurrentPrice > 0 ? suppliedCurrentPrice : lastEodClose;
+        String priceSource = suppliedCurrentPrice > 0
+                ? "PORTFOLIO_SUPPLIED_PRICE"
+                : prices.isEmpty() ? "UNAVAILABLE" : "LAST_STORED_EOD_CLOSE";
+
+        LocalDate latestTradingDate = prices.isEmpty() ? null : prices.get(prices.size() - 1).tradingDate();
+        long priceAgeDays = latestTradingDate == null ? Long.MAX_VALUE
+                : Math.max(0, ChronoUnit.DAYS.between(latestTradingDate, LocalDate.now(MARKET_ZONE)));
+        String priceFreshness = latestTradingDate == null ? "UNAVAILABLE"
+                : priceAgeDays <= 5 ? "FRESH" : priceAgeDays <= 10 ? "AGING" : "STALE";
+
+        // Technical analysis: completed historical daily candles are used for SMA and history.
+        Integer technicalScore = null;
         double return20d = 0.0;
         double drawdown60d = 0.0;
-        String trendText = "Insufficient price history";
+        boolean has20d = prices.size() >= 21 && assessedPrice > 0;
+        boolean has60d = prices.size() >= 60 && assessedPrice > 0;
+        boolean downtrend = false;
+        boolean uptrend = false;
+        String trend = "Insufficient price history";
 
-        if (!prices.isEmpty()) {
-            DailyPrice last = prices.get(prices.size() - 1);
-            latestClose = last.close().doubleValue();
+        if (has20d) {
             int n = prices.size();
+            double close20Ago = value(prices.get(n - 21).close());
+            return20d = close20Ago > 0 ? (assessedPrice / close20Ago - 1.0) * 100.0 : 0.0;
+            double sma20 = prices.subList(n - 20, n).stream()
+                    .mapToDouble(p -> value(p.close())).filter(v -> v > 0).average().orElse(0.0);
 
-            if (n >= 21) {
-                double close20Ago = prices.get(n - 21).close().doubleValue();
-                return20d = close20Ago > 0 ? ((latestClose / close20Ago) - 1.0) * 100.0 : 0.0;
-                double sma20 = prices.subList(n - 20, n).stream()
-                        .mapToDouble(p -> p.close().doubleValue()).average().orElse(latestClose);
-
-                if (latestClose > sma20 && return20d > 2.0) {
-                    technicalScore += 12;
-                    trendText = String.format(Locale.US, "Uptrend (+%.1f%% over 20d, trading above SMA20 ₹%.2f)", return20d, sma20);
-                    growthDrivers.add(String.format(Locale.US, "Positive 20-day price momentum (%+.1f%%) above 20-DMA", return20d));
-                } else if (latestClose < sma20 && return20d < -3.0) {
-                    technicalScore -= 12;
-                    trendText = String.format(Locale.US, "Downtrend (%.1f%% over 20d, below SMA20 ₹%.2f)", return20d, sma20);
-                    risks.add(String.format(Locale.US, "Negative intermediate trend (%.1f%% in 20 sessions) below SMA20", return20d));
-                } else {
-                    trendText = String.format(Locale.US, "Consolidating (%+.1f%% over 20d near SMA20 ₹%.2f)", return20d, sma20);
-                }
+            technicalScore = 20;
+            if (sma20 > 0 && assessedPrice > sma20 && return20d > 2.0) {
+                technicalScore += 12;
+                uptrend = true;
+                trend = String.format(Locale.US, "Uptrend: %+.1f%% over 20 sessions; assessed price is above SMA20 ₹%.2f", return20d, sma20);
+                drivers.add(String.format(Locale.US, "Positive 20-session price momentum (%+.1f%%)", return20d));
+            } else if (sma20 > 0 && assessedPrice < sma20 && return20d < -3.0) {
+                technicalScore -= 12;
+                downtrend = true;
+                trend = String.format(Locale.US, "Downtrend: %.1f%% over 20 sessions; assessed price is below SMA20 ₹%.2f", return20d, sma20);
+                risks.add(String.format(Locale.US, "Weak 20-session price trend (%+.1f%%)", return20d));
             } else {
-                dataGaps.add("Less than 21 trading sessions stored in PostgreSQL; run 5-year backfill for full trend indicators.");
+                trend = String.format(Locale.US, "Consolidating: %+.1f%% over 20 sessions; no strong trend confirmation", return20d);
             }
 
-            if (n >= 60) {
-                double peak60 = prices.subList(n - 60, n).stream()
-                        .mapToDouble(p -> p.high().doubleValue()).max().orElse(latestClose);
-                drawdown60d = peak60 > 0 ? ((latestClose / peak60) - 1.0) * 100.0 : 0.0;
-                if (drawdown60d < -20.0) {
+            if (has60d) {
+                double peak = prices.subList(n - 60, n).stream()
+                        .mapToDouble(p -> value(p.high())).filter(v -> v > 0).max().orElse(assessedPrice);
+                drawdown60d = peak > 0 ? (assessedPrice / peak - 1.0) * 100.0 : 0.0;
+                if (drawdown60d <= -20.0) {
                     technicalScore -= 8;
-                    risks.add(String.format(Locale.US, "Steep 60-session drawdown of %.1f%% from recent peak", drawdown60d));
+                    risks.add(String.format(Locale.US, "Assessed price is %.1f%% below the 60-session high", Math.abs(drawdown60d)));
                 }
             }
+            technicalScore = Math.max(0, Math.min(40, technicalScore));
+        } else if (prices.isEmpty()) {
+            gaps.add("No stored daily price history is available.");
         } else {
-            dataGaps.add("No NSE daily price history found in PostgreSQL for " + symbol + ".");
+            gaps.add("At least 21 trading sessions are required for a 20-session trend assessment.");
         }
-        technicalScore = Math.max(0, Math.min(40, technicalScore));
 
-        // 2. Fundamental Score (0 - 40)
-        int fundamentalScore = 20;
+        // Financial metrics are scored only when actually present. Missing values earn no points.
+        Integer fundamentalScore = null;
+        int fundamentalMax = 0;
+        int fundamentalMetrics = 0;
+        String fundamentalStatus;
         String businessOverview;
         String businessQuality;
-        String valuationView;
-        String fundamentalStatus;
+        String valuation;
 
-        if (fundamentalOpt.isPresent()) {
-            CompanyFundamental f = fundamentalOpt.get();
-            fundamentalStatus = "CONNECTED";
-            businessOverview = String.format("%s operates in the %s sector%s.",
-                    f.companyName() != null ? f.companyName() : symbol,
-                    f.sector() != null ? f.sector() : "Indian equity",
-                    f.marketCap() != null ? " (Market Cap: ₹" + f.marketCap().setScale(0, RoundingMode.HALF_UP) + " Cr)" : "");
+        if (etf) {
+            fundamentalStatus = "NOT_APPLICABLE_ETF";
+            businessOverview = symbol + " is assessed as an exchange-traded fund, not an operating company.";
+            businessQuality = "Company ROE, debt-to-equity and revenue-growth metrics are not applicable to an ETF.";
+            valuation = "ETF-specific NAV premium/discount, expense ratio, tracking difference, underlying asset and liquidity data are not connected yet.";
+            gaps.add("ETF-specific data is missing: underlying benchmark/asset, NAV premium or discount, expense ratio, tracking difference and liquidity.");
+            monitoring.add("Monitor the underlying asset trend, ETF tracking difference, expense ratio and liquidity.");
+        } else if (fundamental.isPresent()) {
+            CompanyFundamental f = fundamental.get();
+            businessOverview = safe(f.companyName(), symbol) + " operates in the " + safe(f.sector(), "unclassified") + " sector.";
+            List<String> quality = new ArrayList<>();
+            int score = 0;
 
-            List<String> qualityNotes = new ArrayList<>();
             if (f.roe() != null) {
-                if (f.roe().doubleValue() >= 15.0) {
-                    fundamentalScore += 8;
-                    qualityNotes.add("Strong ROE of " + f.roe() + "%");
-                    growthDrivers.add("Healthy return on equity (ROE: " + f.roe() + "%)");
-                } else if (f.roe().doubleValue() < 8.0) {
-                    fundamentalScore -= 6;
-                    risks.add("Low return on equity (ROE: " + f.roe() + "%)");
-                }
+                fundamentalMetrics++;
+                score += scoreRoe(f.roe().doubleValue());
+                if (f.roe().doubleValue() >= 15) quality.add("ROE " + f.roe() + "% is relatively strong");
+                if (f.roe().doubleValue() < 8) risks.add("Low ROE: " + f.roe() + "%");
             }
             if (f.debtToEquity() != null) {
-                if (f.debtToEquity().doubleValue() <= 0.5) {
-                    fundamentalScore += 6;
-                    qualityNotes.add("Conservative leverage (D/E: " + f.debtToEquity() + ")");
-                } else if (f.debtToEquity().doubleValue() > 1.5) {
-                    fundamentalScore -= 8;
-                    risks.add("Elevated debt-to-equity ratio (" + f.debtToEquity() + ")");
-                }
+                fundamentalMetrics++;
+                score += scoreDebt(f.debtToEquity().doubleValue());
+                if (f.debtToEquity().doubleValue() <= 0.5) quality.add("conservative debt-to-equity of " + f.debtToEquity());
+                if (f.debtToEquity().doubleValue() > 1.5) risks.add("Elevated debt-to-equity: " + f.debtToEquity());
             }
-            if (f.revenueGrowthYoy() != null && f.revenueGrowthYoy().doubleValue() > 10.0) {
-                fundamentalScore += 6;
-                growthDrivers.add("YoY revenue growth of " + f.revenueGrowthYoy() + "%");
+            if (f.revenueGrowthYoy() != null) {
+                fundamentalMetrics++;
+                score += scoreGrowth(f.revenueGrowthYoy().doubleValue());
+                if (f.revenueGrowthYoy().doubleValue() > 10) drivers.add("Revenue growth: " + f.revenueGrowthYoy() + "% YoY");
+                if (f.revenueGrowthYoy().doubleValue() < 0) risks.add("Revenue declined " + f.revenueGrowthYoy().abs() + "% YoY");
             }
-            businessQuality = qualityNotes.isEmpty()
-                    ? "Fundamental profile recorded; " + trendText
-                    : String.join("; ", qualityNotes) + ". Technical posture: " + trendText;
+            if (f.profitGrowthYoy() != null) {
+                fundamentalMetrics++;
+                score += scoreGrowth(f.profitGrowthYoy().doubleValue());
+                if (f.profitGrowthYoy().doubleValue() > 10) drivers.add("Profit growth: " + f.profitGrowthYoy() + "% YoY");
+                if (f.profitGrowthYoy().doubleValue() < 0) risks.add("Profit declined " + f.profitGrowthYoy().abs() + "% YoY");
+            }
 
-            if (f.peRatio() != null) {
-                double pe = f.peRatio().doubleValue();
-                if (pe > 0 && pe <= 25.0) {
-                    valuationView = "Reasonable valuation at P/E " + f.peRatio() + "x";
-                } else if (pe > 50.0) {
-                    fundamentalScore -= 4;
-                    valuationView = "Richly valued at P/E " + f.peRatio() + "x";
-                    risks.add("High valuation multiple (P/E " + f.peRatio() + "x) leaves limited margin of safety");
-                } else {
-                    valuationView = "P/E multiple at " + f.peRatio() + "x";
-                }
-            } else {
-                valuationView = "P/E ratio not yet populated in company_fundamentals";
-                dataGaps.add("P/E and P/B valuation ratios missing in PostgreSQL.");
+            fundamentalMax = fundamentalMetrics * 10;
+            if (fundamentalMetrics > 0) fundamentalScore = score;
+            fundamentalStatus = fundamentalMetrics == 4 ? "POPULATED"
+                    : fundamentalMetrics > 0 ? "PARTIAL" : "NOT_POPULATED";
+            businessQuality = quality.isEmpty()
+                    ? "Financial data is present but does not yet establish business quality."
+                    : String.join("; ", quality) + ".";
+
+            List<String> valuationParts = new ArrayList<>();
+            if (f.peRatio() != null) valuationParts.add("P/E " + f.peRatio() + "x");
+            if (f.pbRatio() != null) valuationParts.add("P/B " + f.pbRatio() + "x");
+            valuation = valuationParts.isEmpty()
+                    ? "Valuation ratios are not populated."
+                    : String.join(", ", valuationParts) + ". Sector-peer comparison is required before classifying valuation as cheap or expensive.";
+            if (fundamentalMetrics < 4) gaps.add("Fundamental coverage is partial; ROE, debt-to-equity, revenue growth and profit growth are not all available.");
+            if (f.peRatio() == null || f.pbRatio() == null) gaps.add("One or more valuation ratios (P/E, P/B) are missing.");
+
+            Instant updatedAt = f.updatedAt();
+            if (updatedAt != null && ChronoUnit.DAYS.between(updatedAt.atZone(MARKET_ZONE).toLocalDate(), LocalDate.now(MARKET_ZONE)) > 180) {
+                gaps.add("Stored fundamental snapshot is older than 180 days; refresh it before relying on the assessment.");
             }
         } else {
             fundamentalStatus = "NOT_POPULATED";
-            businessOverview = symbol + " (NSE listed equity). Technical posture: " + trendText + ".";
-            businessQuality = "Evaluated on PostgreSQL price action (" + prices.size() + " sessions). Add row to company_fundamentals for ROE/debt scoring.";
-            valuationView = "Fundamental ratios not populated yet (POST /api/fundamentals to enrich)";
-            dataGaps.add("Quarterly fundamentals (ROE, Debt/Equity, P/E, Revenue Growth) not yet ingested for " + symbol + ".");
+            businessOverview = symbol + " is an NSE-listed equity; verified company profile data is not stored yet.";
+            businessQuality = "Business quality cannot be assessed reliably until verified financial information is available.";
+            valuation = "Valuation cannot be assessed until financial ratios and sector-peer information are available.";
+            gaps.add("Company financial information (ROE, debt-to-equity, revenue growth and profit growth) is not populated.");
         }
-        fundamentalScore = Math.max(0, Math.min(40, fundamentalScore));
 
-        // 3. News & Catalyst Score (0 - 20)
-        int newsScore = 10;
-        long negativeNewsCount = recentNews.stream().filter(n -> "NEGATIVE".equalsIgnoreCase(n.sentimentTag())).count();
-        long positiveNewsCount = recentNews.stream().filter(n -> "POSITIVE".equalsIgnoreCase(n.sentimentTag())).count();
-
-        if (negativeNewsCount > 0) {
-            newsScore -= (int) Math.min(10, negativeNewsCount * 5);
-            recentNews.stream()
-                    .filter(n -> "NEGATIVE".equalsIgnoreCase(n.sentimentTag()))
-                    .limit(2)
-                    .forEach(n -> risks.add("Recent negative news catalyst: " + n.headline()));
-        }
-        if (positiveNewsCount > 0) {
-            newsScore += (int) Math.min(10, positiveNewsCount * 4);
-            recentNews.stream()
-                    .filter(n -> "POSITIVE".equalsIgnoreCase(n.sentimentTag()))
-                    .limit(2)
-                    .forEach(n -> growthDrivers.add("Recent positive catalyst: " + n.headline()));
-        }
-        if (recentNews.isEmpty()) {
-            dataGaps.add("No recent news headlines stored in stock_news for the last 14 days.");
-        }
-        newsScore = Math.max(0, Math.min(20, newsScore));
-
-        int totalScore = technicalScore + fundamentalScore + newsScore;
-
-        // 4. Holding Position & Action Decision
-        String holdingAnalysis;
-        double pnlPct = 0.0;
-        if (avgBuyPrice > 0 && latestClose > 0) {
-            pnlPct = ((latestClose / avgBuyPrice) - 1.0) * 100.0;
-            holdingAnalysis = String.format(Locale.US,
-                    "Buy price ₹%.2f vs latest close ₹%.2f (%+.2f%% unrealized P&L). Multi-factor score: %d/100 (Tech %d/40, Fund %d/40, News %d/20).",
-                    avgBuyPrice, latestClose, pnlPct, totalScore, technicalScore, fundamentalScore, newsScore);
+        // News score is absent when there are no stored articles; it is never assigned a neutral default.
+        Integer newsScore = null;
+        long negativeNews = news.stream().filter(n -> "NEGATIVE".equalsIgnoreCase(n.sentimentTag())).count();
+        long positiveNews = news.stream().filter(n -> "POSITIVE".equalsIgnoreCase(n.sentimentTag())).count();
+        if (!news.isEmpty()) {
+            int score = 10 + (int) Math.min(10, positiveNews * 3) - (int) Math.min(10, negativeNews * 4);
+            newsScore = Math.max(0, Math.min(20, score));
+            news.stream().filter(n -> "NEGATIVE".equalsIgnoreCase(n.sentimentTag())).limit(3)
+                    .forEach(n -> risks.add("News flagged negative; verify source and filing: " + n.headline()));
+            news.stream().filter(n -> "POSITIVE".equalsIgnoreCase(n.sentimentTag())).limit(3)
+                    .forEach(n -> drivers.add("News flagged positive; verify source and filing: " + n.headline()));
         } else {
-            holdingAnalysis = String.format(Locale.US,
-                    "Latest close ₹%.2f. Multi-factor score: %d/100 (Tech %d/40, Fund %d/40, News %d/20).",
-                    latestClose, totalScore, technicalScore, fundamentalScore, newsScore);
+            gaps.add("No news items are stored for the last 14 days; news impact is unknown, not neutral.");
         }
 
-        String outlook;
+        double pnlPct = averagePrice > 0 && assessedPrice > 0
+                ? (assessedPrice / averagePrice - 1.0) * 100.0 : 0.0;
+        String holdingAnalysis = averagePrice > 0 && assessedPrice > 0
+                ? String.format(Locale.US,
+                "Average buy price ₹%.2f vs assessed price ₹%.2f (%+.2f%% unrealised P&L). Price source: %s. Latest stored session: %s. P&L is context only and is not used to trigger EXIT.",
+                averagePrice, assessedPrice, pnlPct, priceSource,
+                latestTradingDate == null ? "unavailable" : latestTradingDate.toString())
+                : "Holding P&L cannot be calculated because average buy price or assessed price is unavailable.";
+
+        // Conservative decision rules. Holding loss is deliberately excluded.
+        boolean severeFundamentalDeterioration = false;
+        if (!etf && fundamental.isPresent()) {
+            CompanyFundamental f = fundamental.get();
+            severeFundamentalDeterioration = f.roe() != null && f.profitGrowthYoy() != null
+                    && f.debtToEquity() != null
+                    && f.roe().doubleValue() < 0
+                    && f.profitGrowthYoy().doubleValue() <= -25
+                    && f.debtToEquity().doubleValue() >= 2.0;
+        }
+        boolean severePriceBreakdown = has60d && drawdown60d <= -35.0 && return20d <= -15.0;
+
         String action;
-        if (totalScore >= 65 && negativeNewsCount == 0) {
-            outlook = "POSITIVE";
-            action = "HOLD";
-        } else if (totalScore < 42 || negativeNewsCount >= 2 || (avgBuyPrice > 0 && pnlPct < -15.0 && return20d < -5.0)) {
-            outlook = "NEGATIVE";
-            action = "EXIT";
-        } else {
-            outlook = prices.isEmpty() && fundamentalOpt.isEmpty() ? "INSUFFICIENT_DATA" : "NEUTRAL";
-            action = "REVIEW";
-        }
-
-        String confidence = (!prices.isEmpty() && fundamentalOpt.isPresent()) ? "High"
-                : (!prices.isEmpty() || fundamentalOpt.isPresent()) ? "Medium" : "Low";
-
-        if (growthDrivers.isEmpty()) {
-            growthDrivers.add("Awaiting stronger momentum or fundamental catalyst confirmation.");
-        }
-        if (risks.isEmpty()) {
-            risks.add("Standard equity market volatility and sector rotation risk.");
-        }
-
-        node.put("symbol", symbol);
-        node.put("businessOverview", businessOverview);
-        node.put("businessQuality", businessQuality);
-        node.set("growthDrivers", toArrayNode(growthDrivers));
-        node.put("valuationView", valuationView);
-        node.put("fundamentalDataStatus", fundamentalStatus);
-        node.put("stockOutlook", outlook);
-        node.put("action", action);
-        node.put("confidence", confidence);
-        node.put("reasoning", String.format(Locale.US,
-                "Composite multi-factor score is %d/100 (Technical: %d/40, Fundamentals: %d/40, News: %d/20). %s.",
-                totalScore, technicalScore, fundamentalScore, newsScore, trendText));
-        node.set("risks", toArrayNode(risks));
-        node.set("dataGaps", toArrayNode(dataGaps));
-        node.put("holdingAnalysis", holdingAnalysis);
-        return node;
-    }
-
-    private ArrayNode toArrayNode(List<String> items) {
-        ArrayNode arr = objectMapper.createArrayNode();
-        for (String item : items) arr.add(item);
-        return arr;
-    }
-
-    private static String textOrDefault(JsonNode node, String field, String fallback) {
-        if (node != null && node.hasNonNull(field)) {
-            return node.get(field).asText(fallback);
-        }
-        return fallback;
-    }
-
-    private static double numberOrZero(JsonNode node, String... candidateFields) {
-        if (node == null) return 0.0;
-        for (String field : candidateFields) {
-            if (node.hasNonNull(field)) {
-                return node.get(field).asDouble(0.0);
+        String decision;
+        if (etf) {
+            if (downtrend || negativeNews > 0 || "STALE".equals(priceFreshness)) {
+                action = "REVIEW";
+                decision = "Available signals require monitoring. A price loss or temporary correction alone is not an exit reason; verify the underlying asset outlook and ETF tracking quality.";
+            } else if (has20d) {
+                action = "HOLD";
+                decision = "No verified structural reason to exit is present in the connected data. Monitor the underlying asset, tracking difference, expense ratio and liquidity.";
+            } else {
+                action = "REVIEW";
+                decision = "Insufficient price history or ETF-specific data. Missing information is not a sell signal.";
             }
+        } else if (severeFundamentalDeterioration && severePriceBreakdown && negativeNews >= 2) {
+            action = "EXIT";
+            decision = "Multiple independent severe warning signals are present: negative ROE, sharp profit contraction, high leverage, major price breakdown and repeated negative news. Verify the latest primary filings before acting.";
+        } else if (downtrend || negativeNews > 0 || severeFundamentalDeterioration || "STALE".equals(priceFreshness)) {
+            action = "REVIEW";
+            decision = "One or more warning signals or data-quality limitations require review. The holding's unrealised loss is not an exit trigger.";
+        } else if (has20d && (uptrend || (fundamentalScore != null && fundamentalMax > 0 && fundamentalScore >= fundamentalMax * 0.7))) {
+            action = "HOLD";
+            decision = "Available evidence does not show a deterioration severe enough to justify an exit. Continue monitoring the investment thesis and new disclosures.";
+        } else {
+            action = "REVIEW";
+            decision = "Evidence is mixed or incomplete. Review again when verified market, financial and event information is available.";
+        }
+
+        String outlook = prices.isEmpty() ? "INSUFFICIENT_DATA"
+                : "EXIT".equals(action) || downtrend ? "NEGATIVE"
+                  : "HOLD".equals(action) && uptrend ? "POSITIVE" : "NEUTRAL";
+
+        int availableScore = (technicalScore == null ? 0 : technicalScore)
+                + (fundamentalScore == null ? 0 : fundamentalScore)
+                + (newsScore == null ? 0 : newsScore);
+        int availableMax = (technicalScore == null ? 0 : 40)
+                + fundamentalMax + (newsScore == null ? 0 : 20);
+        boolean complete = !etf && technicalScore != null && fundamentalMetrics == 4 && newsScore != null;
+        Integer overallScore = complete ? availableScore : null;
+        String scoreStatus = complete ? "COMPLETE" : availableScore > 0 ? "PARTIAL" : "NOT_AVAILABLE";
+
+        int covered = (technicalScore != null ? 1 : 0)
+                + (etf || fundamentalMetrics == 4 ? 1 : 0)
+                + (newsScore != null ? 1 : 0);
+        String confidence = covered == 3 && "FRESH".equals(priceFreshness) ? "High"
+                : covered >= 2 ? "Medium" : "Low";
+
+        if (drivers.isEmpty()) drivers.add("No verified positive catalyst was identified in the available data.");
+        if (risks.isEmpty()) risks.add("No specific risk flag was identified in available inputs; this does not mean the investment is risk-free.");
+        monitoring.add("Reassess after new market data, financial results or material announcements.");
+
+        out.put("symbol", symbol);
+        out.put("assetType", assetType);
+        out.put("businessOverview", businessOverview);
+        out.put("businessQuality", businessQuality);
+        out.set("growthDrivers", array(drivers));
+        out.put("valuationView", valuation);
+        out.put("fundamentalDataStatus", fundamentalStatus);
+        out.put("stockOutlook", outlook);
+        out.put("action", action);
+        out.put("decisionRationale", decision);
+        out.put("confidence", confidence);
+        out.put("reasoning", decision + " Technical posture: " + trend + ".");
+        out.set("risks", array(risks));
+        out.set("dataGaps", array(gaps));
+        out.set("monitoringPoints", array(monitoring));
+        out.put("holdingAnalysis", holdingAnalysis);
+
+        out.put("technicalScore", technicalScore == null ? null : technicalScore);
+        out.put("technicalScoreMax", technicalScore == null ? 0 : 40);
+        out.put("fundamentalScore", fundamentalScore == null ? null : fundamentalScore);
+        out.put("fundamentalScoreMax", fundamentalMax);
+        out.put("fundamentalMetricsAvailable", fundamentalMetrics);
+        out.put("newsScore", newsScore == null ? null : newsScore);
+        out.put("newsScoreMax", newsScore == null ? 0 : 20);
+        out.put("availableScore", availableScore);
+        out.put("availableScoreMax", availableMax);
+        out.put("overallScore", overallScore == null ? null : overallScore);
+        out.put("scoreStatus", scoreStatus);
+        out.put("priceFreshness", priceFreshness);
+        out.put("latestTradingDate", latestTradingDate == null ? null : latestTradingDate.toString());
+        out.put("assessedPrice", assessedPrice > 0 ? assessedPrice : null);
+        out.put("priceSource", priceSource);
+        out.put("return20dPct", has20d ? return20d : null);
+        out.put("drawdown60dPct", has60d ? drawdown60d : null);
+        out.put("unrealisedReturnPct", averagePrice > 0 && assessedPrice > 0 ? pnlPct : null);
+        out.put("positiveNewsCount", positiveNews);
+        out.put("negativeNewsCount", negativeNews);
+        return out;
+    }
+
+    private boolean isEtf(String symbol, List<DailyPrice> prices) {
+        if (symbol.endsWith("BEES") || symbol.contains("ETF")) return true;
+        return prices.stream().anyMatch(p ->
+                (p.instrumentType() != null && p.instrumentType().toUpperCase(Locale.ROOT).contains("ETF"))
+                        || (p.series() != null && p.series().toUpperCase(Locale.ROOT).contains("ETF")));
+    }
+
+    private int scoreRoe(double value) {
+        if (value >= 18) return 10;
+        if (value >= 12) return 8;
+        if (value >= 8) return 6;
+        if (value >= 0) return 3;
+        return 0;
+    }
+
+    private int scoreDebt(double value) {
+        if (value <= 0.3) return 10;
+        if (value <= 0.7) return 8;
+        if (value <= 1.5) return 5;
+        if (value <= 2.5) return 2;
+        return 0;
+    }
+
+    private int scoreGrowth(double value) {
+        if (value >= 20) return 10;
+        if (value >= 10) return 8;
+        if (value >= 0) return 5;
+        if (value >= -10) return 2;
+        return 0;
+    }
+
+    private ArrayNode array(List<String> values) {
+        ArrayNode result = objectMapper.createArrayNode();
+        values.forEach(result::add);
+        return result;
+    }
+
+    private static double value(BigDecimal value) {
+        return value == null ? 0.0 : value.doubleValue();
+    }
+
+    private static String safe(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value;
+    }
+
+    private static String text(JsonNode node, String field, String fallback) {
+        return node != null && node.hasNonNull(field) ? node.get(field).asText(fallback) : fallback;
+    }
+
+    private static double number(JsonNode node, String... fields) {
+        if (node == null) return 0.0;
+        for (String field : fields) {
+            if (node.hasNonNull(field)) return node.get(field).asDouble(0.0);
         }
         return 0.0;
     }
