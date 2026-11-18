@@ -1,5 +1,7 @@
 package com.minevest.marketdata;
 
+import com.minevest.history.StockAnalysisStateStore;
+
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -23,9 +25,13 @@ import java.util.zip.ZipInputStream;
 @Service
 public class MarketDataService {
     private final DailyPriceRepository priceRepository;
+    private final StockAnalysisStateStore analysisStateStore;
 
-    public MarketDataService(DailyPriceRepository priceRepository) {
+    public MarketDataService(
+            DailyPriceRepository priceRepository,
+            StockAnalysisStateStore analysisStateStore) {
         this.priceRepository = priceRepository;
+        this.analysisStateStore = analysisStateStore;
     }
 
     @Transactional
@@ -99,6 +105,14 @@ public class MarketDataService {
 
         if (!toInsert.isEmpty()) {
             priceRepository.saveAll(toInsert);
+
+            // Mark only securities affected by newly inserted market rows.
+            // Their analysis will be refreshed by the next Run Market Analysis.
+            analysisStateStore.markDirty(
+                    toInsert.stream()
+                            .map(DailyPriceEntity::toDailyPrice)
+                            .toList()
+            );
         }
         return toInsert.size();
     }

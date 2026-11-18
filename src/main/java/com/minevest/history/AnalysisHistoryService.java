@@ -20,6 +20,11 @@ public class AnalysisHistoryService {
     }
 
     @Transactional(readOnly = true)
+    public boolean exists(String runId) {
+        return runRepository.existsById(runId);
+    }
+
+    @Transactional(readOnly = true)
     public List<AnalysisSnapshot> findAll() {
         return runRepository.findAllByOrderByCreatedAtDesc().stream()
                 .map(AnalysisRunEntity::toSnapshot)
