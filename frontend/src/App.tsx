@@ -136,14 +136,28 @@ export default function App() {
       <header className="topbar">
         <h1 className="page-title">{title}</h1>
         <div className="top-actions">
-          <input className="search" list="global-symbols" placeholder="Search symbol…" value={search} onChange={e => onSearch(e.target.value)} aria-label="Search a stock symbol" />
-          <datalist id="global-symbols">{matches.map(m => <option key={m} value={m} />)}</datalist>
-          <label className="btn ghost small">＋ Import NSE data<input type="file" accept=".zip,.csv" disabled={busy} onChange={importFile} hidden /></label>
+          <input
+              className="search"
+              list="global-symbols"
+              placeholder="Search symbol…"
+              value={search}
+              onChange={e => onSearch(e.target.value)}
+              aria-label="Search a stock symbol"
+          />
+          <datalist id="global-symbols">
+            {matches.map(m => <option key={m} value={m} />)}
+          </datalist>
         </div>
       </header>
       {message && <div className="notice toast" role="status"><span>{message}</span><button className="icon-btn" onClick={() => setMessage('')} aria-label="Dismiss">×</button></div>}
       <main className="content">
-        {page === 'overview' && <Overview portfolio={portfolio} symbols={symbols} rows={rows} analysis={latestAnalysis} busy={busy} onRun={() => { void runAnalysis() }} onOpenStock={openStock} go={go} />}
+        {page === 'overview' && (
+            <Overview
+                symbols={symbols}
+                analysis={latestAnalysis}
+                onOpenStock={openStock}
+            />
+        )}
         {page === 'portfolio' && <PortfolioPage portfolio={portfolio} onOpenStock={openStock} go={go} />}
         {page === 'research' && <Research symbols={symbols} symbol={symbol} onSelect={setResearchSymbol} analysis={latestAnalysis} review={portfolio.review} holdings={portfolio.holdings} />}
         {page === 'ai' && <AIIntelligence portfolio={portfolio} analysis={latestAnalysis} busy={busy} rows={rows} onRun={() => { void runAnalysis() }} onOpenStock={openStock} go={go} />}
