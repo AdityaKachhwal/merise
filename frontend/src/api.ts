@@ -21,6 +21,37 @@ export type ReviewHolding = {
   risks?: string[]
   dataGaps?: string[]
   holdingAnalysis?: string
+
+  // Decision evidence
+  assetType?: string
+  decisionRationale?: string
+  monitoringPoints?: string[]
+
+  // Price and freshness
+  priceFreshness?: string
+  latestTradingDate?: string | null
+  assessedPrice?: number | null
+  priceSource?: string
+
+  // Score breakdown
+  technicalScore?: number | null
+  technicalScoreMax?: number
+  fundamentalScore?: number | null
+  fundamentalScoreMax?: number
+  fundamentalMetricsAvailable?: number
+  newsScore?: number | null
+  newsScoreMax?: number
+  availableScore?: number
+  availableScoreMax?: number
+  overallScore?: number | null
+  scoreStatus?: string
+
+  // Additional evidence
+  return20dPct?: number | null
+  drawdown60dPct?: number | null
+  unrealisedReturnPct?: number | null
+  positiveNewsCount?: number
+  negativeNewsCount?: number
 }
 export type Review = {
   summary?: string

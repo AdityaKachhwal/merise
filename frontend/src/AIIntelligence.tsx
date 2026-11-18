@@ -10,11 +10,49 @@ const level = (c?: string) => { const s = (c || '').toLowerCase(); return s.incl
 const List = ({ items }: { items: string[] }) => <ul className="bullets">{items.map((x, i) => <li key={i}>{x}</li>)}</ul>
 const Section = ({ title, children, wide = false }: { title: string; children: ReactNode; wide?: boolean }) => <div className={`r-card ${wide ? 'wide' : ''}`}><h3>{title}</h3>{children}</div>
 
+const scoreLabel = (score?: number | null, max?: number) => {
+  if (score === null || score === undefined || max === undefined || max <= 0) {
+    return 'Not available'
+  }
+  return `${score} / ${max}`
+}
+
+const priceSourceLabel = (source?: string) => {
+  switch (source) {
+    case 'PORTFOLIO_SUPPLIED_PRICE':
+      return 'Portfolio supplied price'
+    case 'LAST_STORED_EOD_CLOSE':
+      return 'Last stored EOD close'
+    case 'UNAVAILABLE':
+      return 'Unavailable'
+    default:
+      return source || 'Unknown'
+  }
+}
+
+const ScoreRow = ({ label, score, max }: {
+  label: string
+  score?: number | null
+  max?: number
+}) => (
+    <div className="holding-facts">
+    <span>
+      <small>{label}</small>
+      <b>{scoreLabel(score, max)}</b>
+    </span>
+    </div>
+)
+
+
 function StockReport({ item, row, onOpen }: { item: ReviewHolding; row?: HoldingRow; onOpen: (s: string) => void }) {
   const lv = level(item.confidence)
   return <article className="report">
     <header className="report-head">
-      <div><h2>{item.symbol}</h2><button className="link" onClick={() => onOpen(item.symbol)}>Open price research</button></div>
+      <div><h2>{item.symbol}</h2>
+        <div className="muted">
+          {item.assetType || 'Asset type unavailable'}
+        </div>
+        <button className="link" onClick={() => onOpen(item.symbol)}>Open price research</button></div>
       <div className="verdict">
         <div><small>Stock outlook</small><b>{item.stockOutlook || 'Unavailable'}</b></div>
         <div><small>Assessment</small><ActionBadge action={item.action} /></div>
@@ -28,6 +66,83 @@ function StockReport({ item, row, onOpen }: { item: ReviewHolding; row?: Holding
       {item.growthDrivers?.length ? <Section title="Growth drivers"><List items={item.growthDrivers} /></Section> : null}
       {item.valuationView && <Section title="Valuation"><p>{item.valuationView}</p></Section>}
       {item.reasoning && <Section title="Investment outlook and reasoning" wide><p className="prose">{item.reasoning}</p></Section>}
+
+      {item.decisionRationale && (
+          <Section title="Why MineVest recommends this action" wide>
+            <p className="prose">{item.decisionRationale}</p>
+          </Section>
+      )}
+
+      <Section title="Market price and data freshness" wide>
+        <div className="holding-facts">
+    <span>
+      <small>Assessed price</small>
+      <b>{item.assessedPrice != null ? money(item.assessedPrice) : '—'}</b>
+    </span>
+          <span>
+      <small>Price source</small>
+      <b>{priceSourceLabel(item.priceSource)}</b>
+    </span>
+          <span>
+      <small>Latest trading date</small>
+      <b>{item.latestTradingDate || '—'}</b>
+    </span>
+          <span>
+      <small>Price freshness</small>
+      <b>{item.priceFreshness || 'Unknown'}</b>
+    </span>
+        </div>
+        <p className="muted">
+          The assessed price and latest stored trading date are shown separately.
+          A stored EOD close should not be interpreted as a live quote.
+        </p>
+      </Section>
+
+      <Section title="Research score coverage" wide>
+        <div className="holding-facts">
+    <span>
+      <small>Technical score</small>
+      <b>{scoreLabel(item.technicalScore, item.technicalScoreMax)}</b>
+    </span>
+          <span>
+      <small>Fundamental score</small>
+      <b>{scoreLabel(item.fundamentalScore, item.fundamentalScoreMax)}</b>
+    </span>
+          <span>
+      <small>News score</small>
+      <b>{scoreLabel(item.newsScore, item.newsScoreMax)}</b>
+    </span>
+          <span>
+      <small>Overall score</small>
+      <b>
+        {item.overallScore != null
+            ? item.overallScore
+            : 'Not calculated'}
+      </b>
+    </span>
+          <span>
+      <small>Available evidence</small>
+      <b>
+        {item.availableScore ?? 0} / {item.availableScoreMax ?? 0}
+      </b>
+    </span>
+          <span>
+      <small>Fundamental metrics</small>
+      <b>{item.fundamentalMetricsAvailable ?? 0} / 4</b>
+    </span>
+        </div>
+        <p className="muted">
+          Score status: {item.scoreStatus || 'Unknown'}.
+          An incomplete score is intentionally not presented as a complete rating.
+        </p>
+      </Section>
+
+      {item.monitoringPoints?.length ? (
+          <Section title="What to monitor next" wide>
+            <List items={item.monitoringPoints} />
+          </Section>
+      ) : null}
+
       {item.risks?.length ? <Section title="Business and investment risks"><List items={item.risks} /></Section> : null}
       {item.dataGaps?.length ? <Section title="Missing information"><List items={item.dataGaps} /></Section> : null}
     </div>
