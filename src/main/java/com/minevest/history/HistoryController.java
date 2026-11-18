@@ -35,13 +35,22 @@ public class HistoryController {
         }
 
         AnalysisSnapshot calculated = analysis.run();
+
+        // An unchanged dataset returns the previous runId. Do not append
+        // another history record or mutate the original snapshot's note.
+        if (historyService.exists(calculated.runId())) {
+            return calculated;
+        }
+
         AnalysisSnapshot snapshot = new AnalysisSnapshot(
                 calculated.runId(), calculated.createdAt(), calculated.status(),
                 calculated.importedPriceRows(), calculated.distinctSymbols(),
                 calculated.note() + " NSE data update: " + syncNote,
                 calculated.recommendations());
 
-        return historyService.save(snapshot);
+        AnalysisSnapshot saved = historyService.save(snapshot);
+        analysis.updateCachedSnapshot(saved);
+        return saved;
     }
 
     /** Diagnostic endpoint: runs only the incremental NSE sync, without stock analysis. */
