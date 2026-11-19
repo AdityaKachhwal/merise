@@ -9,6 +9,20 @@ spring:
     multipart:
       max-file-size: 25MB
       max-request-size: 25MB
+  datasource:
+    url: jdbc:postgresql://localhost:5432/minevest
+    username: minevest
+    password: minevest_local_2026
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+
+  flyway:
+    enabled: true
+
 minevest:
   storage:
     directory: ./data

@@ -216,3 +216,121 @@ h3 .badge{font-weight:600}
   .panel-body{padding:14px}.panel-head{padding:14px 14px 0}
 }
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
+
+
+/* Market-wide news */
+.market-news-panel {
+  overflow: hidden;
+}
+
+.news-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 650;
+  background: #10281f;
+  border: 1px solid #1d5a42;
+  padding: 5px 9px;
+  border-radius: 999px;
+}
+
+.news-live i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.market-news-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.market-news-card {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 16px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 15px;
+  transition: border-color .15s;
+}
+
+.market-news-card:hover {
+  border-color: #3a4d70;
+}
+
+.news-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.news-number {
+  font-size: 11px;
+  font-weight: 750;
+  color: var(--accent);
+  background: #1d2a47;
+  border-radius: 6px;
+  padding: 4px 7px;
+}
+
+.news-source {
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.market-news-card h3 {
+  font-size: 13.5px;
+  font-weight: 650;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.news-card-bottom {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 11px;
+}
+
+.news-card-bottom time {
+  color: var(--muted);
+}
+
+.news-card-bottom a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 650;
+}
+
+.news-card-bottom a:hover {
+  text-decoration: underline;
+}
+
+.news-empty {
+  padding: 22px 12px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+@media(max-width: 560px) {
+  .market-news-grid {
+    grid-template-columns: 1fr;
+  }
+}
+

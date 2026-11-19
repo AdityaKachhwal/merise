@@ -156,6 +156,8 @@ export default function App() {
                 symbols={symbols}
                 analysis={latestAnalysis}
                 onOpenStock={openStock}
+                onRunAnalysis={() => { void runAnalysis() }}
+                busy={busy}
             />
         )}
         {page === 'portfolio' && <PortfolioPage portfolio={portfolio} onOpenStock={openStock} go={go} />}
