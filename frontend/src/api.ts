@@ -6,6 +6,32 @@ export type Recommendation = { symbol: string; latestClose: number; researchScor
 export type Snapshot = { runId: string; createdAt: string; status: string; importedPriceRows: number; distinctSymbols: number; note: string; recommendations?: Recommendation[] }
 export type Price = { tradingDate: string; symbol: string; series: string; open: number; high: number; low: number; close: number; volume: number }
 
+
+export type MarketNews = {
+  id: number
+  symbol: string
+  headline: string
+  summary?: string
+  source: string
+  url: string
+  publishedAt: string
+  sentimentTag?: string
+}
+
+export async function fetchMarketNews(): Promise<MarketNews[]> {
+  try {
+    const response = await fetch(`${API}/news/market`)
+
+    if (!response.ok) return []
+
+    const result = await response.json()
+    return Array.isArray(result) ? result : []
+  } catch {
+    return []
+  }
+}
+
+
 export type Holding = { id: string; symbol: string; quantity: number; averagePrice: number; currentPrice?: number; updatedAt?: string }
 export type ReviewHolding = {
   symbol: string
