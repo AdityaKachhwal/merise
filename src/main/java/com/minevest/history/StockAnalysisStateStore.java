@@ -1,6 +1,7 @@
 package com.minevest.history;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.minevest.marketdata.DailyPrice;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -60,32 +61,39 @@ public class StockAnalysisStateStore {
     }
 
     public Map<SecurityKey, List<DailyPrice>> findLatestSessionsForBatch(List<SecurityKey> securities, int limit) {
-        if (securities != null && !securities.isEmpty()) {
-            StringBuilder values = new StringBuilder();
-            List<Object> args = new ArrayList();
+        if (securities == null || securities.isEmpty()) return Map.of();
 
-            for(int i = 0; i < securities.size(); ++i) {
-                if (i > 0) {
-                    values.append(",");
-                }
-
-                values.append("(?, ?)");
-                args.add(((SecurityKey)securities.get(i)).symbol());
-                args.add(((SecurityKey)securities.get(i)).isin());
-            }
-
-            args.add(limit);
-            String sql = "WITH target(symbol, isin) AS (VALUES %s), ranked AS (\n    SELECT d.trading_date, d.symbol, d.series, d.isin, d.instrument_type,\n           d.open, d.high, d.low, d.close, d.previous_close,\n           d.volume, d.traded_value,\n           ROW_NUMBER() OVER (\n               PARTITION BY UPPER(TRIM(d.symbol)), UPPER(TRIM(COALESCE(d.isin, '')))\n               ORDER BY d.trading_date DESC,\n                   CASE WHEN d.traded_value IS NOT NULL AND d.traded_value > 0\n                        THEN d.traded_value ELSE d.close * GREATEST(d.volume, 0) END DESC\n           ) AS rn\n    FROM daily_prices d\n    JOIN target t\n      ON UPPER(TRIM(d.symbol)) = t.symbol\n     AND UPPER(TRIM(COALESCE(d.isin, ''))) = t.isin\n    WHERE UPPER(TRIM(COALESCE(d.series, ''))) = 'EQ'\n      AND UPPER(TRIM(COALESCE(d.instrument_type, ''))) = 'STK'\n      AND UPPER(TRIM(COALESCE(d.isin, ''))) LIKE 'INE%%'\n      AND d.close IS NOT NULL AND d.close > 0\n      AND d.high IS NOT NULL AND d.low IS NOT NULL\n)\nSELECT trading_date, symbol, series, isin, instrument_type,\n       open, high, low, close, previous_close, volume, traded_value\nFROM ranked\nWHERE rn <= ?\nORDER BY UPPER(TRIM(symbol)), UPPER(TRIM(COALESCE(isin, ''))), trading_date DESC\n".formatted(values);
-            Map<SecurityKey, List<DailyPrice>> result = new LinkedHashMap();
-            this.jdbc.query(sql, (rs) -> {
-                SecurityKey key = new SecurityKey(rs.getString("symbol").trim().toUpperCase(), rs.getString("isin").trim().toUpperCase());
-                DailyPrice price = this.mapDailyPrice(rs);
-                ((List)result.computeIfAbsent(key, (ignored) -> new ArrayList())).add(price);
-            }, args.toArray());
-            return result;
-        } else {
-            return Map.of();
+        StringBuilder values = new StringBuilder();
+        List<Object> args = new ArrayList<>();
+        for (int i = 0; i < securities.size(); i++) {
+            if (i > 0) values.append(",");
+            values.append("(?, ?)");
+            args.add(securities.get(i).symbol());
+            args.add(securities.get(i).isin());
         }
+
+        String sql = """
+                WITH target(symbol, isin) AS (VALUES %s)
+                SELECT s.symbol, s.isin, s.historical_sessions_json::text
+                FROM stock_analysis_state s
+                JOIN target t ON t.symbol = s.symbol AND t.isin = s.isin
+                WHERE s.has_sufficient_history = TRUE
+                  AND s.historical_sessions_json IS NOT NULL
+                """.formatted(values);
+        Map<SecurityKey, List<DailyPrice>> result = new LinkedHashMap<>();
+        jdbc.query(sql, rs -> {
+            SecurityKey key = new SecurityKey(rs.getString("symbol"), rs.getString("isin"));
+            try {
+                List<DailyPrice> prices = objectMapper.readValue(
+                        rs.getString("historical_sessions_json"),
+                        new TypeReference<List<DailyPrice>>() {});
+                if (prices.size() > limit) prices = prices.subList(prices.size() - limit, prices.size());
+                result.put(key, new ArrayList<>(prices));
+            } catch (Exception ex) {
+                throw new IllegalStateException("Could not read cached historical sessions for " + key.symbol(), ex);
+            }
+        }, args.toArray());
+        return result;
     }
 
     @Transactional
@@ -106,9 +114,30 @@ public class StockAnalysisStateStore {
     }
 
     @Transactional
-    public void saveProcessedState(SecurityKey key, LocalDate latestDate, StockRecommendation recommendation, boolean enoughHistory, boolean passedLiquidity, boolean passedFilters) throws Exception {
-        String recommendationJson = recommendation == null ? null : this.objectMapper.writeValueAsString(recommendation);
-        this.jdbc.update("UPDATE stock_analysis_state\nSET latest_processed_date = ?,\n    recommendation_json = CAST(? AS JSONB),\n    has_sufficient_history = ?,\n    passed_liquidity = ?,\n    passed_filters = ?,\n    dirty = FALSE,\n    updated_at = NOW()\nWHERE symbol = ? AND isin = ?\n", new Object[]{latestDate, recommendationJson, enoughHistory, passedLiquidity, passedFilters, key.symbol(), key.isin()});
+    public void saveProcessedState(
+            SecurityKey key,
+            LocalDate latestDate,
+            StockRecommendation recommendation,
+            boolean enoughHistory,
+            boolean passedLiquidity,
+            boolean passedFilters,
+            List<DailyPrice> historicalSessions) throws Exception {
+        String recommendationJson = recommendation == null ? null : objectMapper.writeValueAsString(recommendation);
+        String historyJson = historicalSessions == null ? null : objectMapper.writeValueAsString(historicalSessions);
+        jdbc.update("""
+                UPDATE stock_analysis_state
+                SET latest_processed_date = ?,
+                    recommendation_json = CAST(? AS JSONB),
+                    historical_sessions_json = CAST(? AS JSONB),
+                    has_sufficient_history = ?,
+                    passed_liquidity = ?,
+                    passed_filters = ?,
+                    dirty = FALSE,
+                    updated_at = NOW()
+                WHERE symbol = ? AND isin = ?
+                """,
+                latestDate, recommendationJson, historyJson,
+                enoughHistory, passedLiquidity, passedFilters, key.symbol(), key.isin());
     }
 
     public List<StockRecommendation> findShortlistCandidates(LocalDate staleCutoff) {
