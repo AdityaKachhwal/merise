@@ -94,9 +94,8 @@ public class MarketAnalysisService {
                     continue;
                 }
 
-                List<DailyPrice> history = new ArrayList<>(newestFirst);
-                Collections.reverse(history);
-                history = uniqueSorted(history);
+                // Cached sessions are persisted oldest-first; do not reverse them.
+                List<DailyPrice> history = uniqueSorted(new ArrayList<>(newestFirst));
 
                 LocalDate historicalLatest = history.get(history.size() - 1).tradingDate();
                 if (quote.marketDate() == null || quote.marketDate().isBefore(historicalLatest)) {
@@ -237,7 +236,7 @@ public class MarketAnalysisService {
 
         if (candidate == null) {
             stateStore.saveProcessedState(
-                    key, latestDate, null, true, false, false);
+                    key, latestDate, null, true, false, false, prices);
             return;
         }
 
@@ -429,16 +428,11 @@ public class MarketAnalysisService {
 
         String reason = String.format(
                 Locale.US,
-                "20-day return %+.1f%% and 60-day return %+.1f%%; "
-                        + "price is %+.1f%% versus SMA20. "
-                        + "Volume is %.2fx its recent baseline and RSI14 is %.1f. "
-                        + "Setup: %s.",
-                r20,
-                r60,
-                closeVsSma20,
-                volumeStrength,
-                rsi,
-                setup
+                "%s momentum. 5-day return %+.1f%%, 20-day return %+.1f%% and 60-day return %+.1f%%; "
+                        + "price is %+.1f%% versus SMA20. Volume is %.2fx its recent baseline and RSI14 is %.1f. "
+                        + "Signal: %s.",
+                direction.toLowerCase(Locale.ROOT),
+                r5, r20, r60, closeVsSma20, volumeStrength, rsi, setup
         );
 
         String risk = String.format(
