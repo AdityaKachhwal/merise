@@ -4,6 +4,7 @@ import { fetchPrices, fetchMarketNews, pct, tone } from './api'
 import type { Price, Snapshot, MarketNews } from './api'
 import { Sparkline } from './charts'
 import { RecommendationPanel } from './Recommendations'
+import { FinancialResearchPreview } from './FinancialResearch'
 
 export function IndexCard({
                               label,
@@ -311,8 +312,55 @@ export default function Overview({
                     )}
                 </div>
             </section>
-
+            <FinancialResearchPreview
+                symbols={(analysis?.recommendations ?? []).slice(0, 5).map(r => r.symbol)}
+                onOpenStock={onOpenStock}
+            />
             <MarketNewsSection />
+
+            {/* Who we are and what we do */}
+            <section className="panel">
+                <div className="panel-head">
+                    <div>
+                        <h2>Who We Are & What We Do</h2>
+                        <p className="sub">
+                            Making stock market research easier for everyone.
+                        </p>
+                    </div>
+                </div>
+
+                <div className="panel-body">
+                    <div className="prose">
+                        <p>
+                            Every day, new investors enter the stock market with
+                            the ambition to build wealth. But understanding companies,
+                            analysing stock prices, interpreting financial data and
+                            making informed investment decisions can be overwhelming.
+                        </p>
+
+                        <p>
+                            That's where MineVest comes in.
+                        </p>
+
+                        <p>
+                            MineVest brings market data, historical performance,
+                            AI-powered insights and company research together in
+                            one place. We aim to help investors understand what
+                            they are investing in, learn how to evaluate stocks
+                            and make informed decisions backed by research rather
+                            than speculation.
+                        </p>
+
+                        <h3>Our Mission</h3>
+
+                        <p>
+                            To make stock market knowledge and research more
+                            accessible to everyone, especially people taking
+                            their first steps towards investing.
+                        </p>
+                    </div>
+                </div>
+            </section>
         </div>
     )
 }

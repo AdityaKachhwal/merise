@@ -1,133 +1,779 @@
+
 import { useEffect, useMemo, useState } from 'react'
+import { FinancialResearch } from './FinancialResearch'
 import type { ReactNode } from 'react'
-import { STOCK_RANGES, compactMoney, dateLabel, fetchPrices, money, pct, returnSince, shiftDate, sliceRange, tone } from './api'
-import type { Holding, Price, Review, Snapshot, StockRange } from './api'
+import {
+  compactMoney,
+  dateLabel,
+  fetchPrices,
+  money,
+  pct,
+  returnSince,
+  shiftDate,
+  tone,
+} from './api'
+import type { Holding, Price, Review, Snapshot } from './api'
 import { LineChart, trendColor } from './charts'
 import { ActionBadge, Empty, Panel, Segmented, Soon, Stat } from './ui'
 
-function Card({ title, ai, children }: { title: string; ai?: boolean; children: ReactNode }) {
-  return <div className="r-card"><h3>{title}{ai && <span className="badge">AI report</span>}</h3>{children}</div>
+const RESEARCH_RANGES = [
+  'Latest',
+  '1D',
+  '10D',
+  '1M',
+  '3M',
+  '6M',
+  '1Y',
+  '3Y',
+  '5Y',
+  'ALL',
+] as const
+
+type ResearchRange = typeof RESEARCH_RANGES[number]
+
+type ChartPoint = {
+  date: string
+  value: number
 }
-const List = ({ items }: { items: string[] }) => <ul className="bullets">{items.map((x, i) => <li key={i}>{x}</li>)}</ul>
 
-export default function Research({ symbols, symbol, onSelect, analysis, review, holdings }: {
-  symbols: string[]; symbol: string; onSelect: (s: string) => void; analysis: Snapshot | null; review: Review | null; holdings: Holding[]
+function Card({
+                title,
+                ai,
+                children,
+              }: {
+  title: string
+  ai?: boolean
+  children: ReactNode
 }) {
-  const [prices, setPrices] = useState<Price[]>([])
-  const [loading, setLoading] = useState(false)
-  const [range, setRange] = useState<StockRange>('1Y')
-  const [query, setQuery] = useState('')
+  return (
+      <div className="r-card">
+        <h3>
+          {title}
+          {ai && <span className="badge">AI report</span>}
+        </h3>
+        {children}
+      </div>
+  )
+}
 
-  useEffect(() => {
-    let c = false
-    if (!symbol) { setPrices([]); return }
-    setLoading(true)
-    void fetchPrices(symbol).then(p => { if (!c) { setPrices(p); setLoading(false) } })
-    return () => { c = true }
-  }, [symbol])
+const List = ({ items }: { items: string[] }) => (
+    <ul className="bullets">
+      {items.map((item, index) => (
+          <li key={index}>{item}</li>
+      ))}
+    </ul>
+)
 
-  const s = useMemo(() => {
-    if (!prices.length) return null
-    const latest = prices[prices.length - 1], prev = prices[prices.length - 2]
-    const ath = prices.reduce((b, i) => i.high > b.high ? i : b, prices[0])
-    const atl = prices.reduce((b, i) => i.low < b.low ? i : b, prices[0])
-    const yr = prices.filter(p => p.tradingDate >= shiftDate(latest.tradingDate, -365))
-    return {
-      latest, ath, atl,
-      day: prev && prev.close ? ((latest.close / prev.close) - 1) * 100 : undefined,
-      hi52: yr.length ? Math.max(...yr.map(p => p.high)) : undefined,
-      lo52: yr.length ? Math.min(...yr.map(p => p.low)) : undefined,
-    }
-  }, [prices])
+// Chart ranges use available imported daily closing prices.
+function getChartPoints(
+    prices: Price[],
+    range: ResearchRange
+): ChartPoint[] {
+  const points = prices.map(price => ({
+    date: price.tradingDate,
+    value: price.close,
+  }))
 
-  const monthly = useMemo(() => {
-    const grouped = new Map<string, Price[]>()
-    prices.forEach(item => { const k = item.tradingDate.slice(0, 7); grouped.set(k, [...(grouped.get(k) || []), item]) })
-    const byMonth = Array.from({ length: 12 }, (_, i) => ({ month: new Date(2000, i, 1).toLocaleString('en', { month: 'short' }), values: [] as number[] }))
-    const months = [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b))
-    for (let i = 1; i < months.length; i++) {
-      const [key, current] = months[i]
-      const [previousKey, previous] = months[i - 1]
-      const pd = new Date(`${previousKey}-01T00:00:00`)
-      pd.setMonth(pd.getMonth() + 1)
-      const consecutive = `${pd.getFullYear()}-${String(pd.getMonth() + 1).padStart(2, '0')}` === key
-      const prevClose = previous[previous.length - 1].close
-      if (consecutive && prevClose > 0) byMonth[Number(key.slice(5, 7)) - 1].values.push(((current[current.length - 1].close / prevClose) - 1) * 100)
-    }
-    return byMonth.map(m => ({ ...m, average: m.values.length ? m.values.reduce((a, b) => a + b, 0) / m.values.length : undefined }))
-  }, [prices])
+  if (range === 'ALL') return points
+  if (range === 'Latest') return points.slice(-5)
+  if (range === '1D') return points.slice(-2)
+  if (range === '10D') return points.slice(-10)
 
-  const pts = sliceRange(prices.map(p => ({ date: p.tradingDate, value: p.close })), range)
-  const ai = review?.holdings?.find(h => h.symbol === symbol)
-  const screen = analysis?.recommendations?.find(r => r.symbol === symbol)
-  const held = holdings.find(h => h.symbol === symbol)
-  const matches = query ? symbols.filter(x => x.startsWith(query.toUpperCase())).slice(0, 40) : []
-
-  function pick(v: string) {
-    setQuery(v)
-    const u = v.trim().toUpperCase()
-    if (symbols.includes(u)) { onSelect(u); setQuery('') }
+  const days: Record<string, number> = {
+    '1M': 30,
+    '3M': 91,
+    '6M': 182,
+    '1Y': 365,
+    '3Y': 1095,
+    '5Y': 1826,
   }
 
-  if (!symbols.length) return <Panel><Empty icon="⌕" title="No market data imported">Import NSE data to research individual stocks.</Empty></Panel>
+  const lookback = days[range]
 
-  return <div className="stack-y">
-    <Panel>
-      <div className="r-head">
-        <div><h2 className="r-symbol">{symbol || 'Stock research'}</h2><p className="muted">NSE · imported daily market data{held && ` · You hold ${held.quantity} @ ${money(held.averagePrice)}`}</p></div>
-        <div className="r-controls">
-          <div><input list="research-symbols" placeholder="Search symbol…" value={query} onChange={e => pick(e.target.value)} aria-label="Search symbol" /><datalist id="research-symbols">{matches.map(m => <option key={m} value={m} />)}</datalist></div>
-          <div className="r-price"><strong>{s ? money(s.latest.close) : '—'}</strong><span className={tone(s?.day)}>{pct(s?.day, 2)} <small>vs previous close · {s ? dateLabel(s.latest.tradingDate) : ''}</small></span></div>
+  if (!lookback || !points.length) return points
+
+  const latestDate = points[points.length - 1].date
+  const cutoff = shiftDate(latestDate, -lookback)
+
+  const firstIndex = points.findIndex(point => point.date >= cutoff)
+
+  return points.slice(firstIndex < 0 ? 0 : firstIndex)
+}
+
+// Trading-session returns:
+// 1D = latest close vs previous available session.
+// 10D = latest close vs close 10 available sessions earlier.
+function returnBySessions(
+    prices: Price[],
+    sessions: number
+): number | undefined {
+  if (
+      !Number.isInteger(sessions) ||
+      sessions < 1 ||
+      prices.length <= sessions
+  ) {
+    return undefined
+  }
+
+  const latest = prices[prices.length - 1]
+  const previous = prices[prices.length - 1 - sessions]
+
+  if (
+      !latest ||
+      !previous ||
+      !Number.isFinite(latest.close) ||
+      !Number.isFinite(previous.close) ||
+      latest.close <= 0 ||
+      previous.close <= 0
+  ) {
+    return undefined
+  }
+
+  return ((latest.close / previous.close) - 1) * 100
+}
+
+export default function Research({
+                                   symbols,
+                                   symbol,
+                                   onSelect,
+                                   analysis,
+                                   review,
+                                   holdings,
+                                 }: {
+  symbols: string[]
+  symbol: string
+  onSelect: (symbol: string) => void
+  analysis: Snapshot | null
+  review: Review | null
+  holdings: Holding[]
+}) {
+  const [priceState, setPriceState] = useState<{
+    symbol: string
+    rows: Price[]
+  }>({
+    symbol: '',
+    rows: [],
+  })
+
+  const [loadingSymbol, setLoadingSymbol] = useState('')
+  const [range, setRange] = useState<ResearchRange>('1Y')
+  const [query, setQuery] = useState('')
+
+  // Keep price data associated with its symbol.
+  // This prevents showing the previous stock's data after a symbol change.
+  useEffect(() => {
+    let cancelled = false
+
+    if (!symbol) {
+      setPriceState({ symbol: '', rows: [] })
+      setLoadingSymbol('')
+      return
+    }
+
+    setLoadingSymbol(symbol)
+
+    void fetchPrices(symbol).then(rows => {
+      if (cancelled) return
+
+      setPriceState({
+        symbol,
+        rows,
+      })
+
+      setLoadingSymbol('')
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [symbol])
+
+  // Only use prices belonging to the currently selected symbol.
+  const prices =
+      priceState.symbol === symbol ? priceState.rows : []
+
+  const loading = Boolean(symbol) && loadingSymbol === symbol
+
+  const stock = useMemo(() => {
+    if (!prices.length) return null
+
+    const latest = prices[prices.length - 1]
+    const previous = prices[prices.length - 2]
+
+    const ath = prices.reduce(
+        (best, item) => item.high > best.high ? item : best,
+        prices[0]
+    )
+
+    const atl = prices.reduce(
+        (best, item) => item.low < best.low ? item : best,
+        prices[0]
+    )
+
+    const yearStart = shiftDate(latest.tradingDate, -365)
+
+    const yearPrices = prices.filter(
+        price => price.tradingDate >= yearStart
+    )
+
+    const dayReturn =
+        previous &&
+        previous.close > 0 &&
+        latest.close > 0
+            ? ((latest.close / previous.close) - 1) * 100
+            : undefined
+
+    return {
+      latest,
+      previous,
+      ath,
+      atl,
+      dayReturn,
+      high52: yearPrices.length
+          ? Math.max(...yearPrices.map(price => price.high))
+          : undefined,
+      low52: yearPrices.length
+          ? Math.min(...yearPrices.map(price => price.low))
+          : undefined,
+    }
+  }, [prices])
+
+  // Monthly seasonality based on consecutive imported calendar months.
+  const monthly = useMemo(() => {
+    const grouped = new Map<string, Price[]>()
+
+    prices.forEach(price => {
+      const key = price.tradingDate.slice(0, 7)
+      const existing = grouped.get(key) || []
+
+      grouped.set(key, [...existing, price])
+    })
+
+    const byMonth = Array.from(
+        { length: 12 },
+        (_, index) => ({
+          month: new Date(2000, index, 1).toLocaleString(
+              'en',
+              { month: 'short' }
+          ),
+          values: [] as number[],
+        })
+    )
+
+    const months = [...grouped.entries()].sort(
+        ([a], [b]) => a.localeCompare(b)
+    )
+
+    for (let index = 1; index < months.length; index++) {
+      const [currentKey, currentPrices] = months[index]
+      const [previousKey, previousPrices] = months[index - 1]
+
+      const previousDate = new Date(
+          `${previousKey}-01T00:00:00`
+      )
+
+      previousDate.setMonth(previousDate.getMonth() + 1)
+
+      const expectedNextMonth =
+          `${previousDate.getFullYear()}-${String(
+              previousDate.getMonth() + 1
+          ).padStart(2, '0')}`
+
+      if (expectedNextMonth !== currentKey) continue
+
+      const previousClose =
+          previousPrices[previousPrices.length - 1]?.close
+
+      const currentClose =
+          currentPrices[currentPrices.length - 1]?.close
+
+      if (
+          !previousClose ||
+          !currentClose ||
+          previousClose <= 0
+      ) {
+        continue
+      }
+
+      const monthIndex = Number(currentKey.slice(5, 7)) - 1
+
+      byMonth[monthIndex].values.push(
+          ((currentClose / previousClose) - 1) * 100
+      )
+    }
+
+    return byMonth.map(month => ({
+      ...month,
+      average: month.values.length
+          ? month.values.reduce((sum, value) => sum + value, 0) /
+          month.values.length
+          : undefined,
+    }))
+  }, [prices])
+
+  const chartPoints = useMemo(
+      () => getChartPoints(prices, range),
+      [prices, range]
+  )
+
+  const ai = review?.holdings?.find(
+      holding => holding.symbol === symbol
+  )
+
+  const screening = analysis?.recommendations?.find(
+      recommendation => recommendation.symbol === symbol
+  )
+
+  const holding = holdings.find(
+      item => item.symbol === symbol
+  )
+
+  const matches = query
+      ? symbols
+          .filter(item => item.startsWith(query.toUpperCase()))
+          .slice(0, 40)
+      : []
+
+  function handleSearch(value: string) {
+    setQuery(value)
+
+    const selected = value.trim().toUpperCase()
+
+    if (symbols.includes(selected)) {
+      onSelect(selected)
+      setQuery('')
+    }
+  }
+
+  if (!symbols.length) {
+    return (
+        <Panel>
+          <Empty icon="⌕" title="No market data imported">
+            Import NSE data to research individual stocks.
+          </Empty>
+        </Panel>
+    )
+  }
+
+  const historicalReturns = [
+    {
+      label: '1 day',
+      value: returnBySessions(prices, 1),
+    },
+    {
+      label: '10 trading days',
+      value: returnBySessions(prices, 10),
+    },
+    {
+      label: '1 month',
+      value: returnSince(prices, 30),
+    },
+    {
+      label: '3 months',
+      value: returnSince(prices, 91),
+    },
+    {
+      label: '6 months',
+      value: returnSince(prices, 182),
+    },
+    {
+      label: '1 year',
+      value: returnSince(prices, 365),
+    },
+    {
+      label: '3 years',
+      value: returnSince(prices, 1095),
+    },
+    {
+      label: '5 years',
+      value: returnSince(prices, 1826),
+    },
+  ]
+
+  return (
+      <div className="stack-y">
+
+        {/* STOCK HEADER */}
+        <Panel>
+          <div className="r-head">
+            <div>
+              <h2 className="r-symbol">
+                {symbol || 'Stock research'}
+              </h2>
+
+              <p className="muted">
+                NSE · Imported daily market data
+                {holding &&
+                    ` · You hold ${holding.quantity} @ ${money(
+                        holding.averagePrice
+                    )}`}
+              </p>
+            </div>
+
+            <div className="r-controls">
+              <div>
+                <input
+                    list="research-symbols"
+                    placeholder="Search symbol…"
+                    value={query}
+                    onChange={event =>
+                        handleSearch(event.target.value)
+                    }
+                    aria-label="Search symbol"
+                />
+
+                <datalist id="research-symbols">
+                  {matches.map(item => (
+                      <option key={item} value={item} />
+                  ))}
+                </datalist>
+              </div>
+
+              <div className="r-price">
+                <strong>
+                  {stock ? money(stock.latest.close) : '—'}
+                </strong>
+
+                <span className={tone(stock?.dayReturn)}>
+                {pct(stock?.dayReturn, 2)}
+
+                  <small>
+                  vs previous close · Latest available close:{' '}
+                    {stock
+                        ? dateLabel(stock.latest.tradingDate)
+                        : '—'}
+                </small>
+              </span>
+              </div>
+            </div>
+          </div>
+        </Panel>
+
+        {/* PRICE STATISTICS */}
+        <div className="stat-grid">
+          <Stat
+              label="52-week high"
+              value={
+                stock?.high52
+                    ? money(stock.high52)
+                    : '—'
+              }
+              sub="Within imported data"
+          />
+
+          <Stat
+              label="52-week low"
+              value={
+                stock?.low52
+                    ? money(stock.low52)
+                    : '—'
+              }
+              sub="Within imported data"
+          />
+
+          <Stat
+              label="High in imported data"
+              value={
+                stock
+                    ? money(stock.ath.high)
+                    : '—'
+              }
+              sub={
+                stock
+                    ? `${dateLabel(stock.ath.tradingDate)} · ${pct(
+                        ((stock.latest.close / stock.ath.high) - 1) * 100
+                    )} away`
+                    : 'No data'
+              }
+          />
+
+          <Stat
+              label="Low in imported data"
+              value={
+                stock
+                    ? money(stock.atl.low)
+                    : '—'
+              }
+              sub={
+                stock
+                    ? dateLabel(stock.atl.tradingDate)
+                    : 'No data'
+              }
+          />
+
+          <Stat
+              label="Imported sessions"
+              value={prices.length.toLocaleString('en-IN')}
+              sub="Coverage may be incomplete"
+          />
         </div>
+
+        {/* PRICE HISTORY AND RETURNS */}
+        <div className="grid-2-1">
+
+          <Panel
+              title="Price history"
+              subtitle="Daily closing prices from your imported NSE data"
+              actions={
+                <Segmented
+                    small
+                    options={RESEARCH_RANGES}
+                    value={range}
+                    onChange={setRange}
+                />
+              }
+          >
+            {loading ? (
+                <div
+                    className="chart-empty"
+                    style={{ height: 280 }}
+                >
+                  Loading price history…
+                </div>
+            ) : chartPoints.length > 1 ? (
+                <>
+                  <LineChart
+                      height={300}
+                      format={compactMoney}
+                      lines={[
+                        {
+                          name: 'Close',
+                          color: trendColor(chartPoints),
+                          points: chartPoints,
+                        },
+                      ]}
+                  />
+
+                  <p className="fineprint">
+                    {range === 'Latest'
+                        ? 'Showing the last 5 available trading sessions.'
+                        : range === '1D'
+                            ? 'Showing the latest and previous available trading sessions.'
+                            : range === '10D'
+                                ? 'Showing the last 10 available trading sessions.'
+                                : range === 'ALL'
+                                    ? 'Showing all available imported daily closing prices.'
+                                    : `Showing imported daily closing prices for ${range}.`}
+                  </p>
+                </>
+            ) : (
+                <Empty title="Not enough price history">
+                  {prices.length === 1
+                      ? 'Only one closing price is available. At least two sessions are needed for a chart.'
+                      : 'No price history is available for this stock and range.'}
+                </Empty>
+            )}
+          </Panel>
+
+          <Panel
+              title="Historical returns"
+              subtitle="Calculated from available imported closing prices"
+          >
+            {loading ? (
+                <div className="chart-empty">
+                  Loading historical returns…
+                </div>
+            ) : (
+                <table className="table compact">
+                  <tbody>
+                  {historicalReturns.map(({ label, value }) => (
+                      <tr key={label}>
+                        <td>{label}</td>
+                        <td className={`r strong ${tone(value)}`}>
+                          {pct(value)}
+                        </td>
+                      </tr>
+                  ))}
+                  </tbody>
+                </table>
+            )}
+
+            <p className="fineprint">
+              1D and 10D use trading sessions, excluding weekends
+              and market holidays. Longer periods retain the
+              existing calendar-day lookback. Price return only.
+              Corporate-action adjustments are not yet applied.
+            </p>
+          </Panel>
+        </div>
+
+        {/* AI OUTLOOK AND SEASONALITY */}
+        <div className="grid-2">
+
+          <Panel
+              title="AI stock outlook"
+              subtitle="From the latest AI stock assessment"
+          >
+            {ai ? (
+                <div className="stack-y tight">
+                  <div className="verdict">
+                    <div>
+                      <small>Outlook</small>
+                      <b>{ai.stockOutlook || 'Unavailable'}</b>
+                    </div>
+
+                    <div>
+                      <small>Assessment</small>
+                      <ActionBadge action={ai.action} />
+                    </div>
+
+                    <div>
+                      <small>Confidence</small>
+                      <b>{ai.confidence || '—'}</b>
+                    </div>
+                  </div>
+
+                  {ai.reasoning ? (
+                      <p className="prose">{ai.reasoning}</p>
+                  ) : (
+                      <p className="muted">
+                        No reasoning was returned for this stock.
+                      </p>
+                  )}
+                </div>
+            ) : (
+                <Soon title="No AI assessment for this stock">
+                  Add {symbol || 'this stock'} to your portfolio
+                  and run the AI stock assessment to see the outlook,
+                  reasoning and HOLD / REVIEW / EXIT view here.
+                </Soon>
+            )}
+          </Panel>
+
+          <Panel
+              title="Monthly seasonality"
+              subtitle="Average month-to-month closing change. Descriptive, not predictive."
+          >
+            <div className="months">
+              {monthly.map(month => (
+                  <div
+                      key={month.month}
+                      className={`month ${
+                          month.average === undefined
+                              ? ''
+                              : month.average >= 0
+                                  ? 'good'
+                                  : 'bad'
+                      }`}
+                  >
+                    <b>{month.month}</b>
+                    <span className={tone(month.average)}>
+                  {pct(month.average)}
+                </span>
+                    <small>{month.values.length} samples</small>
+                  </div>
+              ))}
+            </div>
+
+            <p className="fineprint">
+              Small samples can be misleading.
+            </p>
+          </Panel>
+        </div>
+
+        {/* FINANCIAL RESEARCH FROM FINCRUX */}
+        <FinancialResearch symbol={symbol} />
+
+        {/* AI-POWERED COMPANY ANALYSIS */}
+        <h3 className="section-title">
+          AI-powered company analysis
+        </h3>
+
+        <div className="r-grid">
+
+          <Card
+              title="Business quality and competitive position"
+              ai={!!ai?.businessQuality}
+          >
+            {ai?.businessQuality ? (
+                <p>{ai.businessQuality}</p>
+            ) : (
+                <Soon title="Business quality">
+                  An AI assessment will evaluate competitive position,
+                  business strength and industry standing.
+                </Soon>
+            )}
+          </Card>
+
+          <Card
+              title="AI valuation assessment"
+              ai={!!ai?.valuationView}
+          >
+            {ai?.valuationView ? (
+                <p>{ai.valuationView}</p>
+            ) : (
+                <Soon title="Valuation assessment">
+                  An AI assessment will interpret valuation metrics
+                  and compare them with business performance.
+                </Soon>
+            )}
+          </Card>
+
+          <Card
+              title="Growth drivers"
+              ai={!!ai?.growthDrivers?.length}
+          >
+            {ai?.growthDrivers?.length ? (
+                <List items={ai.growthDrivers} />
+            ) : (
+                <Soon title="Growth drivers">
+                  Key business and industry growth opportunities
+                  will appear after an AI assessment.
+                </Soon>
+            )}
+          </Card>
+
+          <Card
+              title="Business risks"
+              ai={!!ai?.risks?.length}
+          >
+            {ai?.risks?.length ? (
+                <List items={ai.risks} />
+            ) : (
+                <Soon title="Business risks">
+                  Important business, financial and industry risks
+                  will appear after an AI assessment.
+                </Soon>
+            )}
+          </Card>
+
+          <Card title="Screening signals">
+            {screening ? (
+                <div>
+                  <p>
+                    Research score{' '}
+                    <b>{screening.researchScore}/100</b>
+                    {' · '}
+                    {screening.trend}
+                    {screening.setup
+                        ? ` · ${screening.setup}`
+                        : ''}
+                  </p>
+
+                  <p className="muted">
+                    {screening.reason}
+                  </p>
+                </div>
+            ) : (
+                <Soon title="Not in the latest screening">
+                  This stock was not among the latest market
+                  analysis candidates.
+                </Soon>
+            )}
+          </Card>
+        </div>
+
+        {ai?.dataGaps?.length ? (
+            <Panel title="Missing information">
+              <List items={ai.dataGaps} />
+            </Panel>
+        ) : null}
+
+        <p className="fineprint">
+          Historical data is not a forecast or investment
+          recommendation. Scenario analysis needs benchmark and
+          macroeconomic datasets and is not available yet.
+        </p>
       </div>
-    </Panel>
-
-    <div className="stat-grid">
-      <Stat label="52-week high" value={s?.hi52 ? money(s.hi52) : '—'} sub="Within imported data" />
-      <Stat label="52-week low" value={s?.lo52 ? money(s.lo52) : '—'} sub="Within imported data" />
-      <Stat label="High in imported data" value={s ? money(s.ath.high) : '—'} sub={s ? `${dateLabel(s.ath.tradingDate)} · ${pct(((s.latest.close / s.ath.high) - 1) * 100)} away` : 'No data'} />
-      <Stat label="Low in imported data" value={s ? money(s.atl.low) : '—'} sub={s ? dateLabel(s.atl.tradingDate) : 'No data'} />
-      <Stat label="Imported sessions" value={prices.length.toLocaleString('en-IN')} sub="Coverage may be incomplete" />
-    </div>
-
-    <div className="grid-2-1">
-      <Panel title="Price history" subtitle="Daily closing prices from your imported NSE data" actions={<Segmented small options={STOCK_RANGES} value={range} onChange={setRange} />}>
-        {loading ? <div className="chart-empty" style={{ height: 280 }}>Loading price history…</div> : pts.length > 1 ? <LineChart height={300} format={compactMoney} lines={[{ name: 'Close', color: trendColor(pts), points: pts }]} /> : <Empty title="No price history for this symbol yet" />}
-      </Panel>
-      <Panel title="Historical returns" subtitle="Shown only where imported history covers the period">
-        <table className="table compact"><tbody>{([['1 month', 30], ['3 months', 91], ['6 months', 182], ['1 year', 365], ['3 years', 1095], ['5 years', 1826]] as const).map(([l, d]) => {
-          const v = returnSince(prices, d)
-          return <tr key={l}><td>{l}</td><td className={`r strong ${tone(v)}`}>{pct(v)}</td></tr>
-        })}</tbody></table>
-        <p className="fineprint">Price return only. Corporate-action adjustments are not yet applied.</p>
-      </Panel>
-    </div>
-
-    <div className="grid-2">
-      <Panel title="AI stock outlook" subtitle="From the latest AI stock assessment">
-        {ai ? <div className="stack-y tight">
-          <div className="verdict"><div><small>Outlook</small><b>{ai.stockOutlook || 'Unavailable'}</b></div><div><small>Assessment</small><ActionBadge action={ai.action} /></div><div><small>Confidence</small><b>{ai.confidence || '—'}</b></div></div>
-          {ai.reasoning ? <p className="prose">{ai.reasoning}</p> : <p className="muted">No reasoning was returned for this stock.</p>}
-        </div> : <Soon title="No AI assessment for this stock">Add {symbol || 'this stock'} to your portfolio and run the AI stock assessment to see the outlook, reasoning and HOLD / REVIEW / EXIT view here.</Soon>}
-      </Panel>
-      <Panel title="Monthly seasonality" subtitle="Average month-to-month closing change. Descriptive, not predictive.">
-        <div className="months">{monthly.map(m => <div key={m.month} className={`month ${m.average === undefined ? '' : m.average >= 0 ? 'good' : 'bad'}`}><b>{m.month}</b><span className={tone(m.average)}>{pct(m.average)}</span><small>{m.values.length} samples</small></div>)}</div>
-        <p className="fineprint">Small samples can be misleading.</p>
-      </Panel>
-    </div>
-
-    <h3 className="section-title">Company research</h3>
-    <div className="r-grid">
-      <Card title="Company overview" ai={!!ai?.businessOverview}>{ai?.businessOverview ? <p>{ai.businessOverview}</p> : <Soon title="Business details">Source-backed company profiles are not integrated yet.</Soon>}</Card>
-      <Card title="Business quality and competitive position" ai={!!ai?.businessQuality}>{ai?.businessQuality ? <p>{ai.businessQuality}</p> : <Soon title="Business quality">Requires fundamentals and competitor data.</Soon>}</Card>
-      <Card title="Revenue and profit trends"><Soon title="Financial statements">No revenue or profit data is available from the backend.</Soon></Card>
-      <Card title="Financial ratios"><Soon title="Ratios">ROE, ROCE, margins and debt ratios need fundamentals data.</Soon></Card>
-      <Card title="Valuation" ai={!!ai?.valuationView}>{ai?.valuationView ? <p>{ai.valuationView}</p> : <Soon title="Valuation metrics">P/E, P/B and peer comparisons need fundamentals data.</Soon>}</Card>
-      <Card title="Growth drivers" ai={!!ai?.growthDrivers?.length}>{ai?.growthDrivers?.length ? <List items={ai.growthDrivers} /> : <Soon title="Growth drivers">Appear after an AI assessment of this stock.</Soon>}</Card>
-      <Card title="Business risks" ai={!!ai?.risks?.length}>{ai?.risks?.length ? <List items={ai.risks} /> : <Soon title="Business risks">Appear after an AI assessment of this stock.</Soon>}</Card>
-      <Card title="Screening signals">{screen ? <div><p>Research score <b>{screen.researchScore}/100</b> · {screen.trend}{screen.setup ? ` · ${screen.setup}` : ''}</p><p className="muted">{screen.reason}</p></div> : <Soon title="Not in the latest screening">This stock was not among the latest market analysis candidates.</Soon>}</Card>
-    </div>
-    {ai?.dataGaps?.length ? <Panel title="Missing information"><List items={ai.dataGaps} /></Panel> : null}
-    <p className="fineprint">Historical data is not a forecast or investment recommendation. Scenario analysis needs benchmark and macroeconomic datasets and is not available yet.</p>
-  </div>
+  )
 }
