@@ -25,5 +25,6 @@ public record StockRecommendation(
         int volumeScore,
         int riskScore,
         int liquidityScore,
-        String setup
+        String setup,
+        String momentumDirection
 ) {}

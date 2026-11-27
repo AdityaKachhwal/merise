@@ -18,7 +18,7 @@ export function RecommendationPanel({ analysis, title, subtitle, loading = false
       {analysis && recs.length > 0 ? <div className="rec-list">{recs.map((item, index) => <details className="rec" key={`${analysis.runId}-${item.symbol}`}>
         <summary>
           <div className="rec-row">
-            <div className="rec-name"><span className="rank">{index + 1}</span><b>{item.symbol}</b></div>
+            <div className="rec-name"><span className="rank">{index + 1}</span><b>{item.symbol}</b><small>{item.momentumDirection ?? 'POSITIVE'}</small></div>
             <div><small>Price</small><span>{money(item.latestClose)}</span></div>
             <div><small>5D</small><span className={tone(item.return5d)}>{pct(item.return5d)}</span></div>
             <div><small>20D</small><span className={tone(item.return20d)}>{pct(item.return20d)}</span></div>
