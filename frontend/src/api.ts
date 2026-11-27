@@ -101,7 +101,7 @@ export const tone = (v?: number) => v === undefined || !Number.isFinite(v) || v 
 
 export const RANGES = ['1D', '1W', '1M', '3M', '6M', '1Y', 'ALL'] as const
 export type Range = typeof RANGES[number]
-export const STOCK_RANGES = ['1M', '3M', '6M', '1Y', '3Y', '5Y', 'ALL'] as const
+export const STOCK_RANGES = ['Latest', '1D', '10D', '1M', '3M', '6M', '1Y', '3Y', '5Y', 'ALL'] as const
 export type StockRange = typeof STOCK_RANGES[number]
 
 export function shiftDate(date: string, days: number): string {
@@ -113,9 +113,19 @@ export function shiftDate(date: string, days: number): string {
 const DAYS: Record<string, number> = { '1W': 7, '1M': 30, '3M': 91, '6M': 182, '1Y': 365, '3Y': 1095, '5Y': 1826 }
 export function sliceRange<T extends { date: string }>(pts: T[], range: string): T[] {
   if (range === 'ALL' || !pts.length) return pts
+
+  // Latest: last 5 available trading sessions
+  if (range === 'Latest') return pts.slice(-5)
+
+  // One trading session: previous close and latest close
   if (range === '1D') return pts.slice(-2)
+
+  // Last 10 trading sessions
+  if (range === '10D') return pts.slice(-10)
+
   const days = DAYS[range]
   if (!days) return pts
+
   const cut = shiftDate(pts[pts.length - 1].date, -days)
   const i = pts.findIndex(p => p.date >= cut)
   return pts.slice(i < 0 ? 0 : i)
@@ -140,6 +150,33 @@ export function lastClose(prices?: Price[]): number | undefined {
   return Number.isFinite(v) && v > 0 ? v : undefined
 }
 
+// Return over a number of trading-session intervals.
+// 1D = 1 interval; 10D = 10 intervals.
+export function returnBySessions(
+    p: Price[],
+    sessions: number
+): number | undefined {
+  if (!Number.isInteger(sessions) || sessions < 1 || p.length <= sessions) {
+    return undefined
+  }
+
+  const latest = p[p.length - 1]
+  const prior = p[p.length - 1 - sessions]
+
+  if (
+      !latest ||
+      !prior ||
+      !Number.isFinite(latest.close) ||
+      !Number.isFinite(prior.close) ||
+      latest.close <= 0 ||
+      prior.close <= 0
+  ) {
+    return undefined
+  }
+
+  return ((latest.close / prior.close) - 1) * 100
+}
+
 // Return over `days` calendar days. Only shown when imported history actually covers the period.
 export function returnSince(p: Price[], days: number): number | undefined {
   if (p.length < 2) return undefined
@@ -148,4 +185,61 @@ export function returnSince(p: Price[], days: number): number | undefined {
   if (p[0].tradingDate > shiftDate(cutoff, 10)) return undefined
   const prior = p.find(x => x.tradingDate >= cutoff)
   return prior && prior.close ? ((latest.close / prior.close) - 1) * 100 : undefined
+}
+
+
+export type StatementType = 'consolidated' | 'standalone'
+
+export type FincruxResearch = {
+  providerUpdatedAt?: string
+  fetchedAt?: string
+  source?: string
+  statementType?: StatementType
+  companyName?: string
+  symbol?: string
+  data?: {
+    data?: {
+      about?: string
+      top_ratios?: Record<string, string>
+      quaterly_results?: string[][]
+      profit_and_loss?: string[][]
+      balance_sheet?: string[][]
+      cash_flows?: string[][]
+      ratios?: string[][]
+      shareholding_quarterly?: string[][]
+      shareholding_yearly?: string[][]
+      last_updated_at?: string
+    }
+  }
+}
+
+export async function fetchCompanyResearch(
+    symbol: string,
+    statementType: StatementType = 'consolidated'
+): Promise<FincruxResearch | null> {
+  try {
+    const response = await fetch(
+        `${API}/company-research/${encodeURIComponent(symbol)}?statementType=${statementType}`
+    )
+    if (!response.ok) return null
+    return await response.json()
+  } catch {
+    return null
+  }
+}
+
+export async function refreshCompanyResearch(
+    symbol: string,
+    statementType: StatementType = 'consolidated'
+): Promise<FincruxResearch | null> {
+  try {
+    const response = await fetch(
+        `${API}/company-research/${encodeURIComponent(symbol)}/refresh?statementType=${statementType}`,
+        { method: 'POST', headers: { Accept: 'application/json' } }
+    )
+    if (!response.ok) return null
+    return await response.json()
+  } catch {
+    return null
+  }
 }
