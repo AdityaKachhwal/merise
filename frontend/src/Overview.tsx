@@ -225,12 +225,12 @@ export default function Overview({
         }
     }
 
-    const topFiveAnalysis = analysis
-        ? {
+    const recommendations = analysis?.recommendations ?? []
+    const categoryAnalysis = (direction: 'POSITIVE' | 'NEGATIVE' | 'CHANGING'): Snapshot | null =>
+        analysis ? {
             ...analysis,
-            recommendations: (analysis.recommendations ?? []).slice(0, 5),
-        }
-        : null
+            recommendations: recommendations.filter(item => (item.momentumDirection ?? 'POSITIVE') === direction),
+        } : null
 
     return (
         <div className="stack-y">
@@ -264,9 +264,21 @@ export default function Overview({
 
             {/* Existing recommendation display */}
             <RecommendationPanel
-                analysis={topFiveAnalysis}
-                title="Top 5 Stock Recommendations"
-                subtitle="Latest completed market analysis · up to 5 qualifying stocks"
+                analysis={categoryAnalysis('POSITIVE')}
+                title="Positive Momentum"
+                subtitle="Stocks showing breakouts, uptrends or trend continuation"
+                onOpenStock={onOpenStock}
+            />
+            <RecommendationPanel
+                analysis={categoryAnalysis('NEGATIVE')}
+                title="Negative Momentum"
+                subtitle="Stocks showing breakdowns, sustained declines or weakening trends"
+                onOpenStock={onOpenStock}
+            />
+            <RecommendationPanel
+                analysis={categoryAnalysis('CHANGING')}
+                title="Changing Momentum"
+                subtitle="Stocks showing early recovery, weakening momentum or mixed price structure"
                 onOpenStock={onOpenStock}
             />
 
@@ -313,7 +325,7 @@ export default function Overview({
                 </div>
             </section>
             <FinancialResearchPreview
-                symbols={(analysis?.recommendations ?? []).slice(0, 5).map(r => r.symbol)}
+                symbols={(analysis?.recommendations ?? []).filter(r => (r.momentumDirection ?? 'POSITIVE') === 'POSITIVE').slice(0, 5).map(r => r.symbol)}
                 onOpenStock={onOpenStock}
             />
             <MarketNewsSection />
