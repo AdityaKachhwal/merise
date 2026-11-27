@@ -2,7 +2,7 @@
 // Endpoints, request bodies and response shapes are unchanged from the original app.
 export const API = 'http://localhost:8083/api'
 
-export type Recommendation = { symbol: string; latestClose: number; researchScore: number; return5d: number; return20d: number; return60d: number; sma20: number; sma50: number; volumeStrength: number; volatility20d: number; drawdown60d: number; trend: string; reason: string; risk: string; rsi14?: number; atr14Percent?: number; averageDailyTradedValue20?: number; momentumScore?: number; trendScore?: number; volumeScore?: number; riskScore?: number; liquidityScore?: number; setup?: string }
+export type Recommendation = { symbol: string; latestClose: number; researchScore: number; return5d: number; return20d: number; return60d: number; sma20: number; sma50: number; volumeStrength: number; volatility20d: number; drawdown60d: number; trend: string; reason: string; risk: string; rsi14?: number; atr14Percent?: number; averageDailyTradedValue20?: number; momentumScore?: number; trendScore?: number; volumeScore?: number; riskScore?: number; liquidityScore?: number; setup?: string; momentumDirection?: 'POSITIVE' | 'NEGATIVE' | 'CHANGING' }
 export type Snapshot = { runId: string; createdAt: string; status: string; importedPriceRows: number; distinctSymbols: number; note: string; recommendations?: Recommendation[] }
 export type Price = { tradingDate: string; symbol: string; series: string; open: number; high: number; low: number; close: number; volume: number }
 
